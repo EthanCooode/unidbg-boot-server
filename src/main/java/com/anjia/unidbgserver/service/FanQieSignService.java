@@ -23,37 +23,54 @@ public class FanQieSignService {
     private AndroidEmulator emulator;
     private Module module;
     private final long SUB_498434_OFFSET = 0x498434;
-    private File tempSoFile; // 临时文件引用，用于后续清理
+    private File tempSoFile;
+    private volatile boolean initialized = false;
 
     @PostConstruct
-    public void init() throws Exception {
-        // 1. 创建 32 位模拟器
-        emulator = AndroidEmulatorBuilder.for32Bit().build();
-        Memory memory = emulator.getMemory();
-        memory.setLibraryResolver(new AndroidResolver(23));
+    public void init() {
+        try {
+            System.out.println("[FanQieSign] Initializing...");
 
-        // 2. 从 classpath 加载 libsscronet.so 并复制到临时文件
-        InputStream soStream = getClass().getClassLoader().getResourceAsStream("libsscronet.so");
-        if (soStream == null) {
-            throw new RuntimeException("libsscronet.so not found in classpath");
-        }
-        tempSoFile = File.createTempFile("libsscronet", ".so");
-        tempSoFile.deleteOnExit();
-        try (FileOutputStream fos = new FileOutputStream(tempSoFile)) {
-            byte[] buffer = new byte[8192];
-            int len;
-            while ((len = soStream.read(buffer)) > 0) {
-                fos.write(buffer, 0, len);
+            // 1. 创建 32 位模拟器（如果 .so 是 64 位，改为 .for64Bit()）
+            emulator = AndroidEmulatorBuilder.for32Bit().build();
+            Memory memory = emulator.getMemory();
+            memory.setLibraryResolver(new AndroidResolver(23));
+
+            // 2. 从 classpath 加载 libsscronet.so
+            InputStream soStream = getClass().getClassLoader().getResourceAsStream("libsscronet.so");
+            if (soStream == null) {
+                soStream = getClass().getResourceAsStream("/libsscronet.so");
             }
-        }
-        soStream.close();
+            if (soStream == null) {
+                throw new RuntimeException("libsscronet.so not found in classpath");
+            }
+            tempSoFile = File.createTempFile("libsscronet", ".so");
+            tempSoFile.deleteOnExit();
+            try (FileOutputStream fos = new FileOutputStream(tempSoFile)) {
+                byte[] buffer = new byte[8192];
+                int len;
+                while ((len = soStream.read(buffer)) > 0) {
+                    fos.write(buffer, 0, len);
+                }
+            }
+            soStream.close();
+            System.out.println("[FanQieSign] Extracted .so to: " + tempSoFile.getAbsolutePath());
 
-        // 3. 加载 .so 文件
-        module = memory.load(tempSoFile);
-        System.out.println("[FanQieSign] libsscronet.so loaded at base: 0x" + Long.toHexString(module.base));
+            // 3. 加载 .so 文件
+            module = memory.load(tempSoFile);
+            System.out.println("[FanQieSign] libsscronet.so loaded at base: 0x" + Long.toHexString(module.base));
+            initialized = true;
+        } catch (Throwable t) {
+            System.err.println("[FanQieSign] Initialization FAILED: " + t.getMessage());
+            t.printStackTrace();
+            initialized = false;
+        }
     }
 
     public String sign(String headersStr) {
+        if (!initialized) {
+            return "{\"error\":\"service not initialized\"}";
+        }
         MemoryBlock inputBlock = null;
         MemoryBlock outputBlock = null;
         try {
@@ -81,7 +98,7 @@ public class FanQieSignService {
             return com.alibaba.fastjson.JSONObject.toJSONString(result);
         } catch (Exception e) {
             e.printStackTrace();
-            return "{}";
+            return "{\"error\":\"" + e.getMessage() + "\"}";
         } finally {
             if (inputBlock != null) inputBlock.free();
             if (outputBlock != null) outputBlock.free();
