@@ -32,7 +32,7 @@ public class FanQieSignService {
             System.out.println("[FanQieSign] Initializing...");
 
             // 1. 创建 32 位模拟器（如果 .so 是 64 位，改为 .for64Bit()）
-            emulator = AndroidEmulatorBuilder.for32Bit().build();
+            emulator = AndroidEmulatorBuilder.for64Bit().build();
             Memory memory = emulator.getMemory();
             memory.setLibraryResolver(new AndroidResolver(23));
 
