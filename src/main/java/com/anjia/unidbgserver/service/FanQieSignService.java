@@ -11,7 +11,6 @@ import org.springframework.stereotype.Service;
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
 import java.io.File;
-import java.io.IOException;          // <--- 这一行已包含
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
@@ -61,25 +60,16 @@ public class FanQieSignService {
 
             Map<String, Object> result = new HashMap<>();
             result.put("x-gorgon", signature);
-
             return com.alibaba.fastjson.JSONObject.toJSONString(result);
         } catch (Exception e) {
             e.printStackTrace();
             return "{}";
         } finally {
             if (inputBlock != null) {
-                try {
-                    inputBlock.free();
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
+                inputBlock.free();
             }
             if (outputBlock != null) {
-                try {
-                    outputBlock.free();
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
+                outputBlock.free();
             }
         }
     }
@@ -87,7 +77,11 @@ public class FanQieSignService {
     @PreDestroy
     public void destroy() {
         if (emulator != null) {
-            emulator.close();
+            try {
+                emulator.close();
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
         }
     }
 }
