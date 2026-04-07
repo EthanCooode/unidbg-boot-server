@@ -25,12 +25,10 @@ public class FanQieSignService {
 
     private AndroidEmulator emulator;
     private Module module;
-    private UnidbgPointer a1Ptr;
+    private byte[] a1Template;
     private byte[] a2Template;
-    private UnidbgPointer a2TemplatePtr;
 
-    // 函数偏移（根据 IDA 分析）
-    private final long SUB_47223C_OFFSET = 0x47223C;
+    // 函数偏移
     private final long SUB_498434_OFFSET = 0x498434;
     private final long SUB_467CA0_OFFSET = 0x467CA0;
 
@@ -61,22 +59,17 @@ public class FanQieSignService {
             module = emulator.getMemory().load(tempSoFile);
             System.out.println("[FanQieSign] .so base: 0x" + Long.toHexString(module.base));
 
-            // 获取全局配置对象 a1
-            Number ctx = module.callFunction(emulator, SUB_47223C_OFFSET);
-            a1Ptr = UnidbgPointer.pointer(emulator, ctx.longValue());
-            System.out.println("[FanQieSign] a1: 0x" + Long.toHexString(a1Ptr.peer));
+            // 加载 a1 模板
+            InputStream a1Stream = getClass().getClassLoader().getResourceAsStream("a1_template.bin");
+            if (a1Stream == null) throw new RuntimeException("a1_template.bin not found");
+            a1Template = readAllBytes(a1Stream);
+            System.out.println("[FanQieSign] a1 template size: " + a1Template.length);
 
             // 加载 a2 模板
-            InputStream tmplStream = getClass().getClassLoader().getResourceAsStream("a2_template.bin");
-            if (tmplStream == null) throw new RuntimeException("a2_template.bin not found");
-            a2Template = readAllBytes(tmplStream);
+            InputStream a2Stream = getClass().getClassLoader().getResourceAsStream("a2_template.bin");
+            if (a2Stream == null) throw new RuntimeException("a2_template.bin not found");
+            a2Template = readAllBytes(a2Stream);
             System.out.println("[FanQieSign] a2 template size: " + a2Template.length);
-
-            // 将模板加载到模拟器内存中（只读模板）
-            MemoryBlock tmplBlock = emulator.getMemory().malloc(a2Template.length, false);
-            a2TemplatePtr = tmplBlock.getPointer();
-            a2TemplatePtr.write(0, a2Template, 0, a2Template.length);
-            rebasePointers(a2TemplatePtr);
 
             initialized = true;
             System.out.println("[FanQieSign] Initialization completed!");
@@ -95,9 +88,9 @@ public class FanQieSignService {
     }
 
     // 重定位指针：将原真机地址转换为 Unidbg 中的地址
-    private void rebasePointers(UnidbgPointer ptr) {
+    private void rebasePointers(UnidbgPointer ptr, int size) {
         long newBase = module.base;
-        int limit = Math.min(a2Template.length, 0x2000);
+        int limit = Math.min(size, 0x2000);
         for (int off = 0; off + 8 <= limit; off += 8) {
             long val = ptr.getLong(off);
             if (val >= ORIG_BASE && val < ORIG_BASE + 0x2000000) {
@@ -108,7 +101,7 @@ public class FanQieSignService {
         }
     }
 
-    // 创建 std::string 对象（短字符串优化）
+    // 创建 std::string 对象
     private UnidbgPointer createStringObject(String str) {
         byte[] data = str.getBytes(StandardCharsets.UTF_8);
         int len = data.length;
@@ -156,36 +149,43 @@ public class FanQieSignService {
     public String sign(String headersStr) {
         if (!initialized) return "{\"error\":\"service not initialized\"}";
 
-        // 1. 复制模板创建新的 a2 副本
+        // 1. 从模板复制新的 a1
+        MemoryBlock a1Block = emulator.getMemory().malloc(a1Template.length, false);
+        UnidbgPointer a1Copy = a1Block.getPointer();
+        a1Copy.write(0, a1Template, 0, a1Template.length);
+        rebasePointers(a1Copy, a1Template.length);
+
+        // 2. 从模板复制新的 a2
         MemoryBlock a2Block = emulator.getMemory().malloc(a2Template.length, false);
         UnidbgPointer a2Copy = a2Block.getPointer();
         a2Copy.write(0, a2Template, 0, a2Template.length);
-        rebasePointers(a2Copy);
+        rebasePointers(a2Copy, a2Template.length);
 
-        // 2. 清空头部数组（让 sub_467CA0 重新分配）
+        // 3. 清空头部数组（让 sub_467CA0 重新分配）
         a2Copy.setPointer(0x4D8, UnidbgPointer.pointer(emulator, 0L));
         a2Copy.setPointer(0x4E0, UnidbgPointer.pointer(emulator, 0L));
         a2Copy.setPointer(0x4E8, UnidbgPointer.pointer(emulator, 0L));
 
-        // 3. 添加本次请求的头部
+        // 4. 添加本次请求的头部
         parseAndAddHeaders(a2Copy, headersStr);
 
-        // 4. 输出缓冲区
+        // 5. 输出缓冲区
         MemoryBlock outBlock = emulator.getMemory().malloc(512, false);
         UnidbgPointer outPtr = outBlock.getPointer();
 
-        // 5. 调用签名函数
+        // 6. 调用签名函数
         Number ret = module.callFunction(emulator, SUB_498434_OFFSET,
-                a1Ptr.peer, a2Copy.peer, outPtr.peer);
+                a1Copy.peer, a2Copy.peer, outPtr.peer);
         System.out.println("[sub_498434] returned " + ret);
 
-        // 6. 读取签名结果
+        // 7. 读取签名结果
         byte[] outBytes = outPtr.getByteArray(0, 512);
         int len = 0;
         while (len < outBytes.length && outBytes[len] != 0) len++;
         String signature = new String(outBytes, 0, len, StandardCharsets.UTF_8);
 
-        // 7. 释放临时内存
+        // 8. 释放临时内存
+        a1Block.free();
         a2Block.free();
         outBlock.free();
 
