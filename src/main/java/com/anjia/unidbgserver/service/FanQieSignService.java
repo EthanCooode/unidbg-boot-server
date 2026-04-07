@@ -33,7 +33,6 @@ public class FanQieSignService {
     private File tempSoFile;
     private volatile boolean initialized = false;
 
-    // 原始 libsscronet.so 基址（从 Frida 获取）
     private static final long ORIG_BASE = 0x74e0202000L;
 
     @PostConstruct
@@ -75,14 +74,13 @@ public class FanQieSignService {
     }
 
     private long rebasePointer(long origPtr) {
-        if (origPtr >= ORIG_BASE && origPtr < ORIG_BASE + 0x2000000) { // 大致范围
+        if (origPtr >= ORIG_BASE && origPtr < ORIG_BASE + 0x2000000) {
             return module.base + (origPtr - ORIG_BASE);
         }
         return origPtr;
     }
 
     private void constructA2() {
-        // 原始 ee.info 256 字节（从 Frida 完整 dump）
         byte[] eeInfoData = new byte[] {
             (byte)0x2c, (byte)0x49, (byte)0x60, (byte)0xe0, 0x74, 0x00, 0x00, 0x00,
             (byte)0xd4, (byte)0x4d, (byte)0x60, (byte)0xe0, 0x74, 0x00, 0x00, 0x00,
@@ -122,7 +120,6 @@ public class FanQieSignService {
         eeInfoPtr.write(0, eeInfoData, 0, eeInfoData.length);
         System.out.println("[FanQieSign] ee.info at: 0x" + Long.toHexString(eeInfoPtr.peer));
 
-        // 重定位 ee.info 中的指针
         for (int offset = 0; offset < 256; offset += 8) {
             long val = eeInfoPtr.getLong(offset);
             long newVal = rebasePointer(val);
@@ -171,7 +168,6 @@ public class FanQieSignService {
     private void addHeader(String key, String value) {
         UnidbgPointer keyObj = createStringObject(key);
         UnidbgPointer valueObj = createStringObject(value);
-        // 调用 sub_467CA0(a2, keyObj, valueObj, 0)
         module.callFunction(emulator, SUB_467CA0_OFFSET, a2Ptr.peer, keyObj.peer, valueObj.peer, 0L);
         System.out.println("[FanQieSign] Added header: " + key + "=" + value);
     }
@@ -193,7 +189,7 @@ public class FanQieSignService {
         if (!initialized) return "{\"error\":\"service not initialized\"}";
         MemoryBlock outputBlock = null;
         try {
-            constructA2(); // 每次重新构造，避免状态污染
+            constructA2();
             parseAndAddHeaders(headersStr);
 
             outputBlock = emulator.getMemory().malloc(512, false);
@@ -221,7 +217,19 @@ public class FanQieSignService {
 
     @PreDestroy
     public void destroy() {
-        if (emulator != null) emulator.close();
-        if (tempSoFile != null && tempSoFile.exists()) tempSoFile.delete();
+        if (emulator != null) {
+            try {
+                emulator.close();
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+        if (tempSoFile != null && tempSoFile.exists()) {
+            try {
+                tempSoFile.delete();
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
     }
 }
