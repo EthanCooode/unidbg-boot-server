@@ -32,6 +32,7 @@ public class FanQieSignService {
     private final long SUB_498434_OFFSET = 0x498434;
     private final long SUB_467CA0_OFFSET = 0x467CA0;
 
+    private final long ORIG_BASE = 0x74e0202000L;
     private volatile boolean initialized = false;
 
     @PostConstruct
@@ -41,7 +42,6 @@ public class FanQieSignService {
             emulator = AndroidEmulatorBuilder.for64Bit().build();
             emulator.getMemory().setLibraryResolver(new AndroidResolver(23));
 
-            // 加载 libsscronet.so
             InputStream soStream = getClass().getClassLoader().getResourceAsStream("libsscronet.so");
             if (soStream == null) soStream = getClass().getResourceAsStream("/libsscronet.so");
             if (soStream == null) throw new RuntimeException("libsscronet.so not found");
@@ -56,14 +56,12 @@ public class FanQieSignService {
             module = emulator.getMemory().load(tempSoFile);
             System.out.println("[FanQieSign] .so base: 0x" + Long.toHexString(module.base));
 
-            // 加载 a1 模板
             InputStream a1Stream = getClass().getClassLoader().getResourceAsStream("a1_template.bin");
             if (a1Stream == null) throw new RuntimeException("a1_template.bin not found");
             a1Template = readAllBytes(a1Stream);
             System.out.println("[FanQieSign] a1 template size: " + a1Template.length);
             System.out.println("[FanQieSign] a1 first 16 bytes: " + Arrays.toString(Arrays.copyOf(a1Template, 16)));
 
-            // 加载 a2 模板
             InputStream a2Stream = getClass().getClassLoader().getResourceAsStream("a2_template.bin");
             if (a2Stream == null) throw new RuntimeException("a2_template.bin not found");
             a2Template = readAllBytes(a2Stream);
@@ -86,7 +84,25 @@ public class FanQieSignService {
         return baos.toByteArray();
     }
 
-    // 创建 std::string 对象（短字符串优化）
+    // 精确重定位已知指针偏移
+    private void rebasePointers(UnidbgPointer ptr, int size) {
+        long newBase = module.base;
+        int[] knownOffsets = {
+            0x00, 0x08, 0x20, 0x28, 0x30, 0x58, 0x60, 0x78, 0x80, 0x90, 0xB0,
+            0x4D8, 0x4E0, 0x4E8,
+            0x1580, 0x15B0
+        };
+        for (int off : knownOffsets) {
+            if (off + 8 > size) continue;
+            long val = ptr.getLong(off);
+            if (val >= ORIG_BASE && val < ORIG_BASE + 0x2000000) {
+                long newVal = val - ORIG_BASE + newBase;
+                ptr.setLong(off, newVal);
+                System.out.printf("[Rebase] 0x%04x: 0x%x -> 0x%x\n", off, val, newVal);
+            }
+        }
+    }
+
     private UnidbgPointer createStringObject(String str) {
         byte[] data = str.getBytes(StandardCharsets.UTF_8);
         int len = data.length;
@@ -138,38 +154,27 @@ public class FanQieSignService {
         MemoryBlock a2Block = null;
         MemoryBlock outBlock = null;
         try {
-            // 1. 从模板复制新的 a1
             a1Block = emulator.getMemory().malloc(a1Template.length, false);
             UnidbgPointer a1Copy = a1Block.getPointer();
             a1Copy.write(0, a1Template, 0, a1Template.length);
-            // 指针重定位暂时注释掉（避免崩溃）
-            // rebasePointers(a1Copy, a1Template.length);
+            rebasePointers(a1Copy, a1Template.length);
 
-            // 2. 从模板复制新的 a2
             a2Block = emulator.getMemory().malloc(a2Template.length, false);
             UnidbgPointer a2Copy = a2Block.getPointer();
             a2Copy.write(0, a2Template, 0, a2Template.length);
-            // 指针重定位暂时注释掉
-            // rebasePointers(a2Copy, a2Template.length);
+            rebasePointers(a2Copy, a2Template.length);
 
-            // 3. 清空头部数组（让 sub_467CA0 重新分配）
-            a2Copy.setPointer(0x4D8, UnidbgPointer.pointer(emulator, 0L));
-            a2Copy.setPointer(0x4E0, UnidbgPointer.pointer(emulator, 0L));
-            a2Copy.setPointer(0x4E8, UnidbgPointer.pointer(emulator, 0L));
-
-            // 4. 添加本次请求的头部
+            // 注意：不再清空头部数组，保留模板中的初始元数据
+            // 直接添加头部，sub_467CA0 会处理
             parseAndAddHeaders(a2Copy, headersStr);
 
-            // 5. 输出缓冲区
             outBlock = emulator.getMemory().malloc(512, false);
             UnidbgPointer outPtr = outBlock.getPointer();
 
-            // 6. 调用签名函数
             Number ret = module.callFunction(emulator, SUB_498434_OFFSET,
                     a1Copy.peer, a2Copy.peer, outPtr.peer);
             System.out.println("[sub_498434] returned " + ret);
 
-            // 7. 读取签名结果
             byte[] outBytes = outPtr.getByteArray(0, 512);
             int len = 0;
             while (len < outBytes.length && outBytes[len] != 0) len++;
