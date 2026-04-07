@@ -186,6 +186,9 @@ public class FanQieSignService {
     }
 
     public String sign(String headersStr) {
+        // 添加日志，查看传入的 headers 参数
+        System.out.println("[FanQieSign] sign called with headers: " + headersStr);
+
         if (!initialized) return "{\"error\":\"service not initialized\"}";
         MemoryBlock outputBlock = null;
         try {
