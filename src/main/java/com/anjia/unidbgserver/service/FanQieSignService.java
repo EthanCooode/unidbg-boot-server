@@ -17,6 +17,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -28,12 +29,8 @@ public class FanQieSignService {
     private byte[] a1Template;
     private byte[] a2Template;
 
-    // 函数偏移
     private final long SUB_498434_OFFSET = 0x498434;
     private final long SUB_467CA0_OFFSET = 0x467CA0;
-
-    // 真机中 libsscronet.so 的基址（用于指针重定位）
-    private final long ORIG_BASE = 0x74e0202000L;
 
     private volatile boolean initialized = false;
 
@@ -64,12 +61,14 @@ public class FanQieSignService {
             if (a1Stream == null) throw new RuntimeException("a1_template.bin not found");
             a1Template = readAllBytes(a1Stream);
             System.out.println("[FanQieSign] a1 template size: " + a1Template.length);
+            System.out.println("[FanQieSign] a1 first 16 bytes: " + Arrays.toString(Arrays.copyOf(a1Template, 16)));
 
             // 加载 a2 模板
             InputStream a2Stream = getClass().getClassLoader().getResourceAsStream("a2_template.bin");
             if (a2Stream == null) throw new RuntimeException("a2_template.bin not found");
             a2Template = readAllBytes(a2Stream);
             System.out.println("[FanQieSign] a2 template size: " + a2Template.length);
+            System.out.println("[FanQieSign] a2 first 16 bytes: " + Arrays.toString(Arrays.copyOf(a2Template, 16)));
 
             initialized = true;
             System.out.println("[FanQieSign] Initialization completed!");
@@ -87,21 +86,7 @@ public class FanQieSignService {
         return baos.toByteArray();
     }
 
-    // 重定位指针：将原真机地址转换为 Unidbg 中的地址
-    private void rebasePointers(UnidbgPointer ptr, int size) {
-        long newBase = module.base;
-        int limit = Math.min(size, 0x2000);
-        for (int off = 0; off + 8 <= limit; off += 8) {
-            long val = ptr.getLong(off);
-            if (val >= ORIG_BASE && val < ORIG_BASE + 0x2000000) {
-                long newVal = val - ORIG_BASE + newBase;
-                ptr.setLong(off, newVal);
-                System.out.printf("[Rebase] 0x%04x: 0x%x -> 0x%x\n", off, val, newVal);
-            }
-        }
-    }
-
-    // 创建 std::string 对象
+    // 创建 std::string 对象（短字符串优化）
     private UnidbgPointer createStringObject(String str) {
         byte[] data = str.getBytes(StandardCharsets.UTF_8);
         int len = data.length;
@@ -149,49 +134,59 @@ public class FanQieSignService {
     public String sign(String headersStr) {
         if (!initialized) return "{\"error\":\"service not initialized\"}";
 
-        // 1. 从模板复制新的 a1
-        MemoryBlock a1Block = emulator.getMemory().malloc(a1Template.length, false);
-        UnidbgPointer a1Copy = a1Block.getPointer();
-        a1Copy.write(0, a1Template, 0, a1Template.length);
-        rebasePointers(a1Copy, a1Template.length);
+        MemoryBlock a1Block = null;
+        MemoryBlock a2Block = null;
+        MemoryBlock outBlock = null;
+        try {
+            // 1. 从模板复制新的 a1
+            a1Block = emulator.getMemory().malloc(a1Template.length, false);
+            UnidbgPointer a1Copy = a1Block.getPointer();
+            a1Copy.write(0, a1Template, 0, a1Template.length);
+            // 指针重定位暂时注释掉（避免崩溃）
+            // rebasePointers(a1Copy, a1Template.length);
 
-        // 2. 从模板复制新的 a2
-        MemoryBlock a2Block = emulator.getMemory().malloc(a2Template.length, false);
-        UnidbgPointer a2Copy = a2Block.getPointer();
-        a2Copy.write(0, a2Template, 0, a2Template.length);
-        rebasePointers(a2Copy, a2Template.length);
+            // 2. 从模板复制新的 a2
+            a2Block = emulator.getMemory().malloc(a2Template.length, false);
+            UnidbgPointer a2Copy = a2Block.getPointer();
+            a2Copy.write(0, a2Template, 0, a2Template.length);
+            // 指针重定位暂时注释掉
+            // rebasePointers(a2Copy, a2Template.length);
 
-        // 3. 清空头部数组（让 sub_467CA0 重新分配）
-        a2Copy.setPointer(0x4D8, UnidbgPointer.pointer(emulator, 0L));
-        a2Copy.setPointer(0x4E0, UnidbgPointer.pointer(emulator, 0L));
-        a2Copy.setPointer(0x4E8, UnidbgPointer.pointer(emulator, 0L));
+            // 3. 清空头部数组（让 sub_467CA0 重新分配）
+            a2Copy.setPointer(0x4D8, UnidbgPointer.pointer(emulator, 0L));
+            a2Copy.setPointer(0x4E0, UnidbgPointer.pointer(emulator, 0L));
+            a2Copy.setPointer(0x4E8, UnidbgPointer.pointer(emulator, 0L));
 
-        // 4. 添加本次请求的头部
-        parseAndAddHeaders(a2Copy, headersStr);
+            // 4. 添加本次请求的头部
+            parseAndAddHeaders(a2Copy, headersStr);
 
-        // 5. 输出缓冲区
-        MemoryBlock outBlock = emulator.getMemory().malloc(512, false);
-        UnidbgPointer outPtr = outBlock.getPointer();
+            // 5. 输出缓冲区
+            outBlock = emulator.getMemory().malloc(512, false);
+            UnidbgPointer outPtr = outBlock.getPointer();
 
-        // 6. 调用签名函数
-        Number ret = module.callFunction(emulator, SUB_498434_OFFSET,
-                a1Copy.peer, a2Copy.peer, outPtr.peer);
-        System.out.println("[sub_498434] returned " + ret);
+            // 6. 调用签名函数
+            Number ret = module.callFunction(emulator, SUB_498434_OFFSET,
+                    a1Copy.peer, a2Copy.peer, outPtr.peer);
+            System.out.println("[sub_498434] returned " + ret);
 
-        // 7. 读取签名结果
-        byte[] outBytes = outPtr.getByteArray(0, 512);
-        int len = 0;
-        while (len < outBytes.length && outBytes[len] != 0) len++;
-        String signature = new String(outBytes, 0, len, StandardCharsets.UTF_8);
+            // 7. 读取签名结果
+            byte[] outBytes = outPtr.getByteArray(0, 512);
+            int len = 0;
+            while (len < outBytes.length && outBytes[len] != 0) len++;
+            String signature = new String(outBytes, 0, len, StandardCharsets.UTF_8);
 
-        // 8. 释放临时内存
-        a1Block.free();
-        a2Block.free();
-        outBlock.free();
+            Map<String, String> result = new HashMap<>();
+            result.put("x-gorgon", signature);
+            return JSONObject.toJSONString(result);
 
-        Map<String, String> result = new HashMap<>();
-        result.put("x-gorgon", signature);
-        return JSONObject.toJSONString(result);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return "{\"error\":\"" + e.getMessage() + "\"}";
+        } finally {
+            if (a1Block != null) a1Block.free();
+            if (a2Block != null) a2Block.free();
+            if (outBlock != null) outBlock.free();
+        }
     }
 
     @PreDestroy
