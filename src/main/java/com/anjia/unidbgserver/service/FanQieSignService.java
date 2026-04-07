@@ -88,7 +88,6 @@ public class FanQieSignService {
      */
     private void constructA2() {
         // 4.1 准备 ee.info 数据块 (256 字节，从 Frida 中提取，完全静态)
-        // 注意：这些数据中的指针指向 .rodata 段，Unidbg 加载 .so 后会自动映射，无需修改
         byte[] eeInfoData = new byte[] {
             (byte)0x2c, (byte)0x49, (byte)0x60, (byte)0xe0, 0x74, 0x00, 0x00, 0x00,
             (byte)0xd4, (byte)0x4d, (byte)0x60, (byte)0xe0, 0x74, 0x00, 0x00, 0x00,
@@ -135,11 +134,11 @@ public class FanQieSignService {
         // 偏移 0x08: 自引用
         a2Ptr.setPointer(0x08, a2Ptr);
         // 偏移 0x10: 0
-        a2Ptr.setInt64(0x10, 0L);
+        a2Ptr.setLong(0x10, 0L);
         // 偏移 0x18: 5
-        a2Ptr.setInt64(0x18, 5L);
+        a2Ptr.setLong(0x18, 5L);
         // 偏移 0x20: 5
-        a2Ptr.setInt64(0x20, 5L);
+        a2Ptr.setLong(0x20, 5L);
         // 其余偏移默认为 0
 
         System.out.println("[FanQieSign] a2 constructed at: 0x" + Long.toHexString(a2Ptr.peer));
@@ -170,7 +169,7 @@ public class FanQieSignService {
             dataPtr.write(0, data, 0, len);
             dataPtr.setByte(len, (byte) 0);
             ptr.setPointer(0, dataPtr);
-            ptr.setInt64(8, len);
+            ptr.setLong(8, len);
             // 偏移 23 处设置最高位为 1 表示长字符串
             ptr.setByte(23, (byte) 0x80);
         }
@@ -184,7 +183,8 @@ public class FanQieSignService {
         UnidbgPointer keyObj = createStringObject(key);
         UnidbgPointer valueObj = createStringObject(value);
         // 调用 sub_467CA0(a2, keyObj, valueObj, 0)
-        module.callFunction(emulator, SUB_467CA0_OFFSET, a2Ptr, keyObj.toPointer(), valueObj.toPointer(), 0L);
+        // 注意：sub_467CA0 的参数顺序和类型需要根据逆向确定，这里假设是 (a2, keyObj, valueObj, 0)
+        module.callFunction(emulator, SUB_467CA0_OFFSET, a2Ptr.peer, keyObj.peer, valueObj.peer, 0L);
     }
 
     /**
@@ -216,39 +216,19 @@ public class FanQieSignService {
         }
         MemoryBlock outputBlock = null;
         try {
-            // 1. 清空头部数组？不需要，sub_498434 会从头部数组读取，但我们需要先添加
-            // 注意：a2 中的头部数组是全局的，多次调用会累积。如果需要隔离，需要重新初始化。
-            // 为了简单，我们每次调用前清空头部数组（通过重新构造 a2 或设置计数为0）
-            // 但 a2 是全局的，为了不影响后续请求，我们可以在每次 sign 时复制一个新的 a2？
-            // 为了简化，我们假设每次调用都是独立的，直接添加头部后调用签名。
-            // 注意：头部数组的结构复杂，清空较麻烦。这里我们每次调用前不保留旧头部，
-            // 因此建议在 sign 方法中重新构造 a2（或者将 a2 设计为每次新建）。但为了性能，可以重用 a2，
-            // 但要确保之前添加的头部被清除。清除头部数组最简单的方法是重新构造 a2。
-            // 鉴于性能影响不大，我们每次调用都重新构造 a2 和 ee.info。
-            // 但为了避免重复分配，可以先释放旧的再新建。为简单，这里每次调用都重新构造。
-            // 注意：由于我们已在 init 中分配了 a2 和 ee.info，重复构造会导致内存泄漏，但 Unidbg 会在模拟器关闭时释放。
-            // 更好的做法：在 sign 中临时构造 a2 和头部。但为了代码清晰，我们直接重用 init 中的 a2，
-            // 并假设头部数组在每次调用前是空的。实际上头部数组可能包含之前调用的残留，导致签名错误。
-            // 因此，我们改为在 sign 中独立构造 a2 和头部，避免状态污染。
-
-            // 重新构造 a2 和 ee.info（确保每次请求干净）
+            // 每次调用重新构造 a2 和头部，避免状态污染
             constructA2();
-
-            // 2. 添加头部
             parseAndAddHeaders(headersStr);
 
-            // 3. 分配输出缓冲区
             outputBlock = emulator.getMemory().malloc(512, false);
             UnidbgPointer outputPtr = outputBlock.getPointer();
 
-            // 4. 调用签名函数
             Number ret = module.callFunction(emulator, SUB_498434_OFFSET,
-                    a1Ptr,
-                    a2Ptr,
-                    outputPtr);
+                    a1Ptr.peer,
+                    a2Ptr.peer,
+                    outputPtr.peer);
             System.out.println("[FanQieSign] sub_498434 returned: " + ret);
 
-            // 5. 读取输出
             byte[] outBytes = outputPtr.getByteArray(0, 512);
             int len = 0;
             while (len < outBytes.length && outBytes[len] != 0) len++;
